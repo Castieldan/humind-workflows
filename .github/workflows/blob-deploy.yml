@@ -161,6 +161,7 @@ jobs:
 
       - name: Purge Front Door Cache
         run: |
+          set -f  # Disable globbing to prevent /* from expanding
           az afd endpoint purge \
             --resource-group ${{ inputs.front_door_resource_group }} \
             --profile-name ${{ inputs.front_door_profile }} \

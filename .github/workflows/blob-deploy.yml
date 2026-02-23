@@ -1,0 +1,200 @@
+# Reusable workflow: Deploy static files to Azure Blob Storage + purge CDN
+# Handles: Azure login → SAS token → azcopy upload → validate → purge CDN → cleanup
+#
+# Called by: humind-B2B, humind-merchant-embed, humind-quiz-elements
+
+name: Blob Storage Deploy
+
+on:
+  workflow_call:
+    inputs:
+      storage_account_name:
+        description: 'Azure Storage account name'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Build artifact name to download'
+        required: true
+        type: string
+      front_door_resource_group:
+        description: 'Azure Front Door resource group'
+        required: true
+        type: string
+      front_door_profile:
+        description: 'Azure Front Door profile name'
+        required: true
+        type: string
+      front_door_endpoint:
+        description: 'Azure Front Door endpoint name'
+        required: true
+        type: string
+      front_door_purge_paths:
+        description: 'Content paths to purge (e.g., /* or /index.html /)'
+        required: false
+        type: string
+        default: '/*'
+      enable_cache_control:
+        description: 'Add Cache-Control headers to uploads'
+        required: false
+        type: boolean
+        default: false
+      enable_validation:
+        description: 'Validate uploaded files for 0-byte issues'
+        required: false
+        type: boolean
+        default: false
+      enable_cleanup:
+        description: 'Clean up stale files from previous deployments'
+        required: false
+        type: boolean
+        default: false
+      has_i18n:
+        description: 'Upload i18n files with no-cache override'
+        required: false
+        type: boolean
+        default: false
+      environment_name:
+        description: 'GitHub environment name'
+        required: true
+        type: string
+    secrets: inherit
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: build
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Generate SAS token
+        id: sas
+        run: |
+          END_DATE=$(date -u -d "+1 hour" '+%Y-%m-%dT%H:%MZ')
+          SAS_TOKEN=$(az storage container generate-sas \
+            --account-name ${{ inputs.storage_account_name }} \
+            --name '$web' \
+            --permissions rwdl \
+            --expiry "$END_DATE" \
+            --auth-mode login \
+            --as-user \
+            --output tsv)
+          echo "token=$SAS_TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Upload files to blob storage
+        run: |
+          DEST="https://${{ inputs.storage_account_name }}.blob.core.windows.net/\$web?${{ steps.sas.outputs.token }}"
+
+          if [ "${{ inputs.enable_cache_control }}" = "true" ]; then
+            # Upload with Cache-Control headers (long cache for hashed assets)
+            LONG_CACHE="public, max-age=31536000, immutable"
+            NO_CACHE="no-cache, no-store, must-revalidate"
+            SHORT_CACHE="public, max-age=3600"
+
+            # Hashed assets — long cache (1 year, immutable)
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.js" --content-type "application/javascript" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.css" --content-type "text/css" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.svg" --content-type "image/svg+xml" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.png" --content-type "image/png" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.webp" --content-type "image/webp" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.jpg" --content-type "image/jpeg" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.jpeg" --content-type "image/jpeg" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.gif" --content-type "image/gif" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ico" --content-type "image/x-icon" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff2" --content-type "font/woff2" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff" --content-type "font/woff" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ttf" --content-type "font/ttf" --cache-control "$LONG_CACHE" --overwrite true
+
+            # HTML — never cache (CDN always serves latest)
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.html" --content-type "text/html" --cache-control "$NO_CACHE" --overwrite true
+
+            # JSON config — short cache (1 hour)
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --cache-control "$SHORT_CACHE" --overwrite true
+
+            # i18n override — no cache for translation files
+            if [ "${{ inputs.has_i18n }}" = "true" ]; then
+              DEST_I18N="https://${{ inputs.storage_account_name }}.blob.core.windows.net/\$web/assets/i18n?${{ steps.sas.outputs.token }}"
+              azcopy copy "./build/assets/i18n/*" "$DEST_I18N" --content-type "application/json" --cache-control "$NO_CACHE" --overwrite true
+            fi
+          else
+            # Upload without Cache-Control headers (simple MIME type mapping)
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.js" --content-type "application/javascript" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.css" --content-type "text/css" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.html" --content-type "text/html" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.svg" --content-type "image/svg+xml" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.png" --content-type "image/png" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.webp" --content-type "image/webp" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.jpg" --content-type "image/jpeg" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.jpeg" --content-type "image/jpeg" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.gif" --content-type "image/gif" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ico" --content-type "image/x-icon" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff2" --content-type "font/woff2" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff" --content-type "font/woff" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ttf" --content-type "font/ttf" --overwrite true
+          fi
+
+      - name: Validate uploaded files
+        if: inputs.enable_validation
+        run: |
+          echo "Checking for 0-byte JS/CSS files in storage..."
+          EMPTY_FILES=$(az storage blob list \
+            --account-name ${{ inputs.storage_account_name }} \
+            --container-name '$web' \
+            --auth-mode login \
+            --query "[?properties.contentLength==\`0\` && (ends_with(name, '.js') || ends_with(name, '.css') || ends_with(name, '.html'))].name" \
+            --output tsv)
+
+          if [ -n "$EMPTY_FILES" ]; then
+            echo "::error::Found 0-byte files in storage after upload:"
+            echo "$EMPTY_FILES"
+            exit 1
+          fi
+          echo "All files validated successfully."
+
+      - name: Purge Front Door Cache
+        run: |
+          az afd endpoint purge \
+            --resource-group ${{ inputs.front_door_resource_group }} \
+            --profile-name ${{ inputs.front_door_profile }} \
+            --endpoint-name ${{ inputs.front_door_endpoint }} \
+            --content-paths ${{ inputs.front_door_purge_paths }} \
+            --no-wait
+
+      - name: Clean up old files from previous deployments
+        if: inputs.enable_cleanup
+        run: |
+          # Build list of files in current deployment
+          cd build && find . -type f | sed 's|^\./||' | sort > /tmp/local_files.txt && cd ..
+
+          # List all remote blobs
+          az storage blob list \
+            --account-name ${{ inputs.storage_account_name }} \
+            --container-name '$web' \
+            --auth-mode login \
+            --num-results '*' \
+            --query "[].name" \
+            --output tsv | sort > /tmp/remote_files.txt
+
+          # Delete blobs not in the current build (after a grace period for in-flight requests)
+          STALE_FILES=$(comm -23 /tmp/remote_files.txt /tmp/local_files.txt)
+          if [ -n "$STALE_FILES" ]; then
+            echo "Removing $(echo "$STALE_FILES" | wc -l) stale files from previous deployments..."
+            echo "Waiting 30 seconds for in-flight requests to complete..."
+            sleep 30
+            echo "$STALE_FILES" | xargs -I {} az storage blob delete \
+              --account-name ${{ inputs.storage_account_name }} \
+              --container-name '$web' \
+              --auth-mode login \
+              --name "{}"
+          else
+            echo "No stale files to clean up."
+          fi

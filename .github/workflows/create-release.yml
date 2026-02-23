@@ -1,0 +1,90 @@
+# Reusable workflow: Create a versioned GitHub Release
+# Attaches the deployment artifact and generates release notes
+#
+# Called by: all Humind app repositories after successful deployment
+
+name: Create Release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version string (e.g., 20260223-a1b2c3d)'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Build artifact to attach to the release (empty string to skip)'
+        required: false
+        type: string
+        default: ''
+      environment:
+        description: 'Environment deployed to (production or preprod)'
+        required: true
+        type: string
+      docker_image:
+        description: 'Docker image URI (for container-based deployments)'
+        required: false
+        type: string
+        default: ''
+    secrets: inherit
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 10
+
+      - name: Download artifact
+        if: inputs.artifact_name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: release-artifact
+
+      - name: Package release artifact
+        if: inputs.artifact_name != ''
+        run: |
+          cd release-artifact
+          # If the artifact already contains a single zip, use it directly
+          ZIP_COUNT=$(find . -maxdepth 1 -name "*.zip" | wc -l)
+          if [ "$ZIP_COUNT" -eq 1 ]; then
+            cp *.zip ../release-${{ inputs.version }}.zip
+          else
+            # Otherwise, zip the entire directory
+            zip -r ../release-${{ inputs.version }}.zip .
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          EOF_MARKER=$(openssl rand -hex 8)
+          {
+            echo "body<<$EOF_MARKER"
+            echo "## Deployment"
+            echo "- **Environment:** ${{ inputs.environment }}"
+            echo "- **Version:** ${{ inputs.version }}"
+            echo "- **Commit:** ${{ github.sha }}"
+            echo "- **Deployed at:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "- **Triggered by:** ${{ github.actor }}"
+            if [ -n "${{ inputs.docker_image }}" ]; then
+              echo "- **Docker image:** \`${{ inputs.docker_image }}\`"
+            fi
+            echo ""
+            echo "## Changes"
+            git log --oneline --no-decorate -10 2>/dev/null || echo "No commit history available"
+            echo "$EOF_MARKER"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: "${{ inputs.environment == 'preprod' && 'Preprod' || 'Production' }} - v${{ inputs.version }}"
+          body: ${{ steps.notes.outputs.body }}
+          prerelease: ${{ inputs.environment == 'preprod' }}
+          files: release-${{ inputs.version }}.zip
+          fail_on_unmatched_files: false

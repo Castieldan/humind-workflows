@@ -1,0 +1,278 @@
+# Reusable workflow: Slot-based App Service deployment for one region
+# Handles: deploy to staging slot → verify → swap → verify production → rollback on failure
+#
+# Called by: humind-backend, humind-website
+
+name: Slot Deploy Region
+
+on:
+  workflow_call:
+    inputs:
+      region_label:
+        description: 'Human-readable region name (e.g., Europe, US)'
+        required: true
+        type: string
+      app_name:
+        description: 'Azure App Service name'
+        required: true
+        type: string
+      resource_group:
+        description: 'Azure resource group'
+        required: true
+        type: string
+      staging_url:
+        description: 'URL of the staging slot'
+        required: true
+        type: string
+      production_url:
+        description: 'URL of the production slot'
+        required: true
+        type: string
+      staging_slot_name:
+        description: 'Name of the staging deployment slot'
+        required: false
+        type: string
+        default: 'staging'
+      artifact_name:
+        description: 'Name of the build artifact to download'
+        required: true
+        type: string
+      artifact_filename:
+        description: 'Zip filename inside the artifact (e.g., deploy.zip)'
+        required: true
+        type: string
+      health_check_path:
+        description: 'URL path for health checks (e.g., /health or /)'
+        required: true
+        type: string
+      health_check_wait:
+        description: 'Seconds to wait before first health check'
+        required: false
+        type: string
+        default: '30'
+      health_check_retries:
+        description: 'Number of health check retry attempts'
+        required: false
+        type: string
+        default: '5'
+      health_check_delay:
+        description: 'Seconds between health check retries'
+        required: false
+        type: string
+        default: '10'
+      skip_swap:
+        description: 'Deploy to staging slot only (do not swap to production)'
+        required: false
+        type: boolean
+        default: false
+      env_staging:
+        description: 'GitHub environment name for staging deployment'
+        required: true
+        type: string
+      env_production:
+        description: 'GitHub environment name for production deployment'
+        required: true
+        type: string
+    outputs:
+      deployment_status:
+        description: 'Final deployment status: staging-only, healthy, or unhealthy'
+        value: ${{ jobs.status.outputs.result }}
+    secrets: inherit
+
+jobs:
+  # ============================================
+  # DEPLOY TO STAGING SLOT
+  # ============================================
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.env_staging }}
+      url: ${{ inputs.staging_url }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to ${{ inputs.region_label }} staging slot
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            echo "Deploying to ${{ inputs.region_label }} staging slot..."
+            az webapp deploy \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --src-path ${{ inputs.artifact_filename }} \
+              --type zip \
+              --async false
+            echo "Deployment to staging slot complete"
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
+
+  # ============================================
+  # VERIFY STAGING SLOT
+  # ============================================
+  verify-staging:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    outputs:
+      health_status: ${{ steps.health_check.outputs.status }}
+    steps:
+      - name: Wait for deployment to stabilize
+        run: sleep ${{ inputs.health_check_wait }}
+
+      - name: Verify ${{ inputs.region_label }} staging slot health
+        id: health_check
+        run: |
+          max_retries=${{ inputs.health_check_retries }}
+          retry_delay=${{ inputs.health_check_delay }}
+
+          for i in $(seq 1 $max_retries); do
+            response=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.staging_url }}${{ inputs.health_check_path }}")
+            if [ "$response" = "200" ]; then
+              echo "${{ inputs.region_label }} staging health check passed (attempt $i/$max_retries)"
+              echo "status=healthy" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $i/$max_retries: ${{ inputs.region_label }} staging returned HTTP $response, retrying in ${retry_delay}s..."
+            [ $i -lt $max_retries ] && sleep $retry_delay
+          done
+
+          echo "${{ inputs.region_label }} staging health check failed after $max_retries attempts"
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          exit 1
+
+  # ============================================
+  # SWAP STAGING TO PRODUCTION
+  # ============================================
+  swap:
+    runs-on: ubuntu-latest
+    needs: verify-staging
+    if: |
+      needs.verify-staging.outputs.health_status == 'healthy' &&
+      inputs.skip_swap != true
+    environment:
+      name: ${{ inputs.env_production }}
+      url: ${{ inputs.production_url }}
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Swap staging to production (${{ inputs.region_label }})
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            echo "Swapping staging slot to production for ${{ inputs.region_label }}..."
+            az webapp deployment slot swap \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --target-slot production
+            echo "Swap completed successfully"
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
+
+  # ============================================
+  # VERIFY PRODUCTION AFTER SWAP
+  # ============================================
+  verify-production:
+    runs-on: ubuntu-latest
+    needs: swap
+    if: inputs.skip_swap != true
+    outputs:
+      health_status: ${{ steps.health_check.outputs.status }}
+    steps:
+      - name: Wait for swap to stabilize
+        run: sleep 15
+
+      - name: Verify ${{ inputs.region_label }} production health after swap
+        id: health_check
+        run: |
+          max_retries=${{ inputs.health_check_retries }}
+          retry_delay=${{ inputs.health_check_delay }}
+
+          for i in $(seq 1 $max_retries); do
+            response=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.production_url }}${{ inputs.health_check_path }}")
+            if [ "$response" = "200" ]; then
+              echo "${{ inputs.region_label }} production health check passed after swap (attempt $i/$max_retries)"
+              echo "status=healthy" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Attempt $i/$max_retries: ${{ inputs.region_label }} production returned HTTP $response, retrying in ${retry_delay}s..."
+            [ $i -lt $max_retries ] && sleep $retry_delay
+          done
+
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          echo "::error::${{ inputs.region_label }} production health check failed after swap!"
+          exit 1
+
+  # ============================================
+  # AUTO-ROLLBACK ON FAILURE
+  # ============================================
+  rollback:
+    runs-on: ubuntu-latest
+    needs: verify-production
+    if: failure() && needs.verify-production.outputs.health_status == 'unhealthy'
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Rollback ${{ inputs.region_label }} (swap back)
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            echo "::warning::Rolling back ${{ inputs.region_label }} deployment by swapping slots..."
+            az webapp deployment slot swap \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --target-slot production
+            echo "Rollback swap completed"
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
+
+  # ============================================
+  # COMPUTE FINAL STATUS
+  # ============================================
+  status:
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [verify-staging, swap, verify-production, rollback]
+    outputs:
+      result: ${{ steps.compute.outputs.status }}
+    steps:
+      - name: Compute deployment status
+        id: compute
+        run: |
+          if [ "${{ inputs.skip_swap }}" = "true" ]; then
+            if [ "${{ needs.verify-staging.outputs.health_status }}" = "healthy" ]; then
+              echo "status=staging-only" >> $GITHUB_OUTPUT
+            else
+              echo "status=unhealthy" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ needs.verify-production.outputs.health_status }}" = "healthy" ]; then
+            echo "status=healthy" >> $GITHUB_OUTPUT
+          elif [ "${{ needs.rollback.result }}" = "success" ]; then
+            echo "status=rolled-back" >> $GITHUB_OUTPUT
+          else
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+          fi

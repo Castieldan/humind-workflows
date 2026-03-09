@@ -102,12 +102,13 @@ jobs:
 
             # Compress with ffmpeg
             echo "  Compressing with ffmpeg (H.264, CRF 28, max 1080p)..."
+            FFMPEG_LOG="/tmp/media-optimize/ffmpeg.log"
             if ffmpeg -i "$LOCAL_IN" \
               -c:v libx264 -crf 28 -preset slow \
-              -vf "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease" \
+              -vf "scale=iw*min(1\,1920/iw):ih*min(1\,1080/ih)" \
               -c:a aac -b:a 128k \
               -movflags +faststart \
-              -y "$LOCAL_OUT" 2>/dev/null; then
+              -y "$LOCAL_OUT" 2>"$FFMPEG_LOG"; then
 
               NEW_SIZE=$(stat -c%s "$LOCAL_OUT")
               echo "  Compressed size: $(numfmt --to=iec $NEW_SIZE)"
@@ -160,6 +161,7 @@ jobs:
               fi
             else
               echo "  ✗ ffmpeg failed for $BLOB"
+              tail -10 "$FFMPEG_LOG" 2>/dev/null || true
               FAILED_COUNT=$((FAILED_COUNT + 1))
             fi
 

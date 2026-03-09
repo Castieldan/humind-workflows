@@ -27,16 +27,27 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Get storage account key
+        id: key
+        run: |
+          KEY=$(az storage account keys list \
+            --account-name "${{ inputs.storage_account_name }}" \
+            --query "[0].value" \
+            --output tsv)
+          echo "::add-mask::$KEY"
+          echo "storage_key=$KEY" >> $GITHUB_OUTPUT
+
       - name: List and optimize unoptimized videos
         run: |
           ACCOUNT="${{ inputs.storage_account_name }}"
           CONTAINER="${{ inputs.container_name }}"
+          export AZURE_STORAGE_KEY="${{ steps.key.outputs.storage_key }}"
 
           echo "Listing blobs in $ACCOUNT/$CONTAINER..."
           BLOBS=$(az storage blob list \
             --account-name "$ACCOUNT" \
             --container-name "$CONTAINER" \
-            --auth-mode login \
+            --auth-mode key \
             --query "[?ends_with(name, '.mp4') || ends_with(name, '.mov') || ends_with(name, '.webm')].name" \
             --output tsv)
 
@@ -61,7 +72,7 @@ jobs:
               --account-name "$ACCOUNT" \
               --container-name "$CONTAINER" \
               --name "$BLOB" \
-              --auth-mode login \
+              --auth-mode key \
               --query "optimized" \
               --output tsv 2>/dev/null || echo "")
 
@@ -83,7 +94,7 @@ jobs:
               --container-name "$CONTAINER" \
               --name "$BLOB" \
               --file "$LOCAL_IN" \
-              --auth-mode login \
+              --auth-mode key \
               --no-progress > /dev/null
 
             ORIGINAL_SIZE=$(stat -c%s "$LOCAL_IN")
@@ -114,7 +125,7 @@ jobs:
                   --name "$UPLOAD_NAME" \
                   --file "$LOCAL_OUT" \
                   --content-type "video/mp4" \
-                  --auth-mode login \
+                  --auth-mode key \
                   --overwrite \
                   --no-progress > /dev/null
 
@@ -124,7 +135,7 @@ jobs:
                     --account-name "$ACCOUNT" \
                     --container-name "$CONTAINER" \
                     --name "$BLOB" \
-                    --auth-mode login > /dev/null
+                    --auth-mode key > /dev/null
                 fi
 
                 # Tag as optimized
@@ -133,7 +144,7 @@ jobs:
                   --container-name "$CONTAINER" \
                   --name "$UPLOAD_NAME" \
                   --metadata optimized=true \
-                  --auth-mode login > /dev/null
+                  --auth-mode key > /dev/null
 
                 echo "  ✓ Optimized and tagged"
                 OPTIMIZED_COUNT=$((OPTIMIZED_COUNT + 1))
@@ -144,7 +155,7 @@ jobs:
                   --container-name "$CONTAINER" \
                   --name "$BLOB" \
                   --metadata optimized=true \
-                  --auth-mode login > /dev/null
+                  --auth-mode key > /dev/null
                 SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
               fi
             else

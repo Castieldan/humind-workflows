@@ -1,0 +1,173 @@
+# Reusable workflow: Optimize videos in Azure Blob Storage
+# Downloads unoptimized videos, compresses with ffmpeg (H.264, CRF 28, max 1080p),
+# re-uploads and tags as optimized. Idempotent — skips already-optimized blobs.
+#
+# Called by: humind-website
+
+name: Optimize Media
+
+on:
+  workflow_call:
+    inputs:
+      storage_account_name:
+        description: 'Azure Storage account name'
+        required: true
+        type: string
+      container_name:
+        description: 'Blob container name'
+        required: true
+        type: string
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: List and optimize unoptimized videos
+        run: |
+          ACCOUNT="${{ inputs.storage_account_name }}"
+          CONTAINER="${{ inputs.container_name }}"
+
+          echo "Listing blobs in $ACCOUNT/$CONTAINER..."
+          BLOBS=$(az storage blob list \
+            --account-name "$ACCOUNT" \
+            --container-name "$CONTAINER" \
+            --auth-mode login \
+            --query "[?ends_with(name, '.mp4') || ends_with(name, '.mov') || ends_with(name, '.webm')].name" \
+            --output tsv)
+
+          if [ -z "$BLOBS" ]; then
+            echo "No video blobs found. Nothing to do."
+            exit 0
+          fi
+
+          OPTIMIZED_COUNT=0
+          SKIPPED_COUNT=0
+          FAILED_COUNT=0
+
+          mkdir -p /tmp/media-optimize
+
+          while IFS= read -r BLOB; do
+            echo ""
+            echo "========================================"
+            echo "Processing: $BLOB"
+
+            # Check if already optimized via metadata tag
+            OPTIMIZED=$(az storage blob metadata show \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "$BLOB" \
+              --auth-mode login \
+              --query "optimized" \
+              --output tsv 2>/dev/null || echo "")
+
+            if [ "$OPTIMIZED" = "true" ]; then
+              echo "  ✓ Already optimized — skipping"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
+
+            # Download
+            LOCAL_IN="/tmp/media-optimize/input_$(basename "$BLOB")"
+            LOCAL_OUT="/tmp/media-optimize/output_$(basename "$BLOB")"
+            # Ensure output extension is .mp4
+            LOCAL_OUT="${LOCAL_OUT%.*}.mp4"
+
+            echo "  Downloading..."
+            az storage blob download \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "$BLOB" \
+              --file "$LOCAL_IN" \
+              --auth-mode login \
+              --no-progress > /dev/null
+
+            ORIGINAL_SIZE=$(stat -c%s "$LOCAL_IN")
+            echo "  Original size: $(numfmt --to=iec $ORIGINAL_SIZE)"
+
+            # Compress with ffmpeg
+            echo "  Compressing with ffmpeg (H.264, CRF 28, max 1080p)..."
+            if ffmpeg -i "$LOCAL_IN" \
+              -c:v libx264 -crf 28 -preset slow \
+              -vf "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease" \
+              -c:a aac -b:a 128k \
+              -movflags +faststart \
+              -y "$LOCAL_OUT" 2>/dev/null; then
+
+              NEW_SIZE=$(stat -c%s "$LOCAL_OUT")
+              echo "  Compressed size: $(numfmt --to=iec $NEW_SIZE)"
+
+              # Only upload if compressed is smaller
+              if [ "$NEW_SIZE" -lt "$ORIGINAL_SIZE" ]; then
+                SAVINGS=$(( (ORIGINAL_SIZE - NEW_SIZE) * 100 / ORIGINAL_SIZE ))
+                echo "  Savings: ${SAVINGS}% — uploading optimized version..."
+
+                # Upload (keep same blob name, convert extension to .mp4 if needed)
+                UPLOAD_NAME="${BLOB%.*}.mp4"
+                az storage blob upload \
+                  --account-name "$ACCOUNT" \
+                  --container-name "$CONTAINER" \
+                  --name "$UPLOAD_NAME" \
+                  --file "$LOCAL_OUT" \
+                  --content-type "video/mp4" \
+                  --auth-mode login \
+                  --overwrite \
+                  --no-progress > /dev/null
+
+                # Delete original if extension changed
+                if [ "$UPLOAD_NAME" != "$BLOB" ]; then
+                  az storage blob delete \
+                    --account-name "$ACCOUNT" \
+                    --container-name "$CONTAINER" \
+                    --name "$BLOB" \
+                    --auth-mode login > /dev/null
+                fi
+
+                # Tag as optimized
+                az storage blob metadata update \
+                  --account-name "$ACCOUNT" \
+                  --container-name "$CONTAINER" \
+                  --name "$UPLOAD_NAME" \
+                  --metadata optimized=true \
+                  --auth-mode login > /dev/null
+
+                echo "  ✓ Optimized and tagged"
+                OPTIMIZED_COUNT=$((OPTIMIZED_COUNT + 1))
+              else
+                echo "  Compressed file is larger — keeping original, tagging as optimized"
+                az storage blob metadata update \
+                  --account-name "$ACCOUNT" \
+                  --container-name "$CONTAINER" \
+                  --name "$BLOB" \
+                  --metadata optimized=true \
+                  --auth-mode login > /dev/null
+                SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              fi
+            else
+              echo "  ✗ ffmpeg failed for $BLOB"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+
+            # Cleanup temp files
+            rm -f "$LOCAL_IN" "$LOCAL_OUT"
+
+          done <<< "$BLOBS"
+
+          echo ""
+          echo "========================================"
+          echo "Summary:"
+          echo "  Optimized: $OPTIMIZED_COUNT"
+          echo "  Skipped:   $SKIPPED_COUNT"
+          echo "  Failed:    $FAILED_COUNT"
+
+          if [ "$FAILED_COUNT" -gt 0 ]; then
+            echo "::warning::$FAILED_COUNT video(s) failed to optimize"
+          fi
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()

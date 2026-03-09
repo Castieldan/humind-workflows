@@ -101,14 +101,13 @@ jobs:
             echo "  Original size: $(numfmt --to=iec $ORIGINAL_SIZE)"
 
             # Compress with ffmpeg
-            echo "  Compressing with ffmpeg (H.264, CRF 28, max 1080p)..."
+            echo "  Compressing with ffmpeg (H.264, CRF 28)..."
             FFMPEG_LOG="/tmp/media-optimize/ffmpeg.log"
-            if ffmpeg -i "$LOCAL_IN" \
+            if ffmpeg -nostdin -i "$LOCAL_IN" \
               -c:v libx264 -crf 28 -preset slow \
-              -vf "scale=iw*min(1\,1920/iw):ih*min(1\,1080/ih)" \
               -c:a aac -b:a 128k \
               -movflags +faststart \
-              -y "$LOCAL_OUT" 2>"$FFMPEG_LOG"; then
+              -y "$LOCAL_OUT" > /dev/null 2>"$FFMPEG_LOG"; then
 
               NEW_SIZE=$(stat -c%s "$LOCAL_OUT")
               echo "  Compressed size: $(numfmt --to=iec $NEW_SIZE)"

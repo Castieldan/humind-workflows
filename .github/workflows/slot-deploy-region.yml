@@ -110,6 +110,7 @@ jobs:
               --slot ${{ inputs.staging_slot_name }} \
               --src-path ${{ inputs.artifact_filename }} \
               --type zip \
+              --clean true \
               --async false
             echo "Deployment to staging slot complete"
 

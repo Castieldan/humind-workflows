@@ -100,16 +100,17 @@ jobs:
 
       - name: Deploy to ${{ inputs.region_label }} staging slot
         uses: azure/CLI@v2
-        timeout-minutes: 15
         with:
           azcliversion: latest
           inlineScript: |
             echo "Deploying to ${{ inputs.region_label }} staging slot..."
-            az webapp deployment source config-zip \
+            az webapp deploy \
               --resource-group ${{ inputs.resource_group }} \
               --name ${{ inputs.app_name }} \
               --slot ${{ inputs.staging_slot_name }} \
-              --src ${{ inputs.artifact_filename }}
+              --src-path ${{ inputs.artifact_filename }} \
+              --type zip \
+              --async false
             echo "Deployment to staging slot complete"
 
       - name: Logout from Azure

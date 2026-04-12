@@ -73,6 +73,11 @@ on:
         description: 'GitHub environment name for production deployment'
         required: true
         type: string
+      startup_command:
+        description: 'Custom startup command (bypasses Oryx runtime script). When set, Oryx build is disabled.'
+        required: false
+        type: string
+        default: ''
     outputs:
       deployment_status:
         description: 'Final deployment status: staging-only, healthy, or unhealthy'
@@ -98,6 +103,25 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Configure staging slot for pre-built deploy
+        if: inputs.startup_command != ''
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az webapp config appsettings set \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --settings ENABLE_ORYX_BUILD=false SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+              --output none
+            az webapp config set \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --startup-file "${{ inputs.startup_command }}" \
+              --output none
+
       - name: Deploy to ${{ inputs.region_label }} staging slot
         uses: azure/CLI@v2
         with:
@@ -110,6 +134,7 @@ jobs:
               --slot ${{ inputs.staging_slot_name }} \
               --src-path ${{ inputs.artifact_filename }} \
               --type zip \
+              --clean true \
               --async false
             echo "Deployment to staging slot complete"
 

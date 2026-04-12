@@ -109,12 +109,6 @@ jobs:
         with:
           azcliversion: latest
           inlineScript: |
-            az webapp config appsettings set \
-              --resource-group ${{ inputs.resource_group }} \
-              --name ${{ inputs.app_name }} \
-              --slot ${{ inputs.staging_slot_name }} \
-              --settings ENABLE_ORYX_BUILD=false SCM_DO_BUILD_DURING_DEPLOYMENT=false \
-              --output none
             az webapp config set \
               --resource-group ${{ inputs.resource_group }} \
               --name ${{ inputs.app_name }} \
@@ -124,18 +118,36 @@ jobs:
 
       - name: Deploy to ${{ inputs.region_label }} staging slot
         uses: azure/CLI@v2
+        timeout-minutes: 15
         with:
           azcliversion: latest
           inlineScript: |
             echo "Deploying to ${{ inputs.region_label }} staging slot..."
-            az webapp deploy \
-              --resource-group ${{ inputs.resource_group }} \
-              --name ${{ inputs.app_name }} \
-              --slot ${{ inputs.staging_slot_name }} \
-              --src-path ${{ inputs.artifact_filename }} \
-              --type zip \
-              --clean true \
-              --async false
+            if [ -n "${{ inputs.startup_command }}" ]; then
+              # Pre-built deploy: use Kudu zipdeploy API directly to bypass Oryx
+              # node_modules compression. az webapp deploy always triggers Oryx which
+              # compresses node_modules into a tar.gz symlink that fails to extract.
+              CREDS=$(az webapp deployment list-publishing-credentials \
+                --resource-group ${{ inputs.resource_group }} \
+                --name ${{ inputs.app_name }} \
+                --slot ${{ inputs.staging_slot_name }} \
+                --query '{user:publishingUserName, pass:publishingPassword}' -o json)
+              USER=$(echo $CREDS | jq -r '.user')
+              PASS=$(echo $CREDS | jq -r '.pass')
+              curl -s -X POST \
+                --user "$USER:$PASS" \
+                --data-binary @${{ inputs.artifact_filename }} \
+                -H "Content-Type: application/zip" \
+                "https://${{ inputs.app_name }}-${{ inputs.staging_slot_name }}.scm.azurewebsites.net/api/zipdeploy?isAsync=false"
+            else
+              az webapp deploy \
+                --resource-group ${{ inputs.resource_group }} \
+                --name ${{ inputs.app_name }} \
+                --slot ${{ inputs.staging_slot_name }} \
+                --src-path ${{ inputs.artifact_filename }} \
+                --type zip \
+                --async false
+            fi
             echo "Deployment to staging slot complete"
 
       - name: Logout from Azure

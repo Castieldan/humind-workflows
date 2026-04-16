@@ -120,6 +120,13 @@ jobs:
   # ============================================
   # VERIFY STAGING SLOT
   # ============================================
+  # Verification goes through the Azure management plane (Entra ID auth), not
+  # data-plane curl, because *.azurewebsites.net is blocked by ip_restriction
+  # post-network-lockdown. We check:
+  #   1. Slot state == Running (app didn't crash on startup)
+  #   2. Last deployment status == 4 (Success — 0=Pending, 1..3=in progress/failed)
+  # The swap step itself enforces 200 on /health via WEBSITE_SWAP_WARMUP_PING_PATH
+  # (set in humind-infrastructure), so a slot that would 500 cannot be swapped.
   verify-staging:
     runs-on: ubuntu-latest
     needs: deploy-staging
@@ -129,26 +136,49 @@ jobs:
       - name: Wait for deployment to stabilize
         run: sleep ${{ inputs.health_check_wait }}
 
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
       - name: Verify ${{ inputs.region_label }} staging slot health
         id: health_check
-        run: |
-          max_retries=${{ inputs.health_check_retries }}
-          retry_delay=${{ inputs.health_check_delay }}
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            max_retries=${{ inputs.health_check_retries }}
+            retry_delay=${{ inputs.health_check_delay }}
 
-          for i in $(seq 1 $max_retries); do
-            response=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.staging_url }}${{ inputs.health_check_path }}")
-            if [ "$response" = "200" ]; then
-              echo "${{ inputs.region_label }} staging health check passed (attempt $i/$max_retries)"
-              echo "status=healthy" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            echo "Attempt $i/$max_retries: ${{ inputs.region_label }} staging returned HTTP $response, retrying in ${retry_delay}s..."
-            [ $i -lt $max_retries ] && sleep $retry_delay
-          done
+            for i in $(seq 1 $max_retries); do
+              state=$(az webapp show \
+                --name "${{ inputs.app_name }}" \
+                --resource-group "${{ inputs.resource_group }}" \
+                --slot "${{ inputs.staging_slot_name }}" \
+                --query state -o tsv 2>/dev/null || echo "Unknown")
+              deploy_status=$(az webapp log deployment list \
+                --name "${{ inputs.app_name }}" \
+                --resource-group "${{ inputs.resource_group }}" \
+                --slot "${{ inputs.staging_slot_name }}" \
+                --query "[0].status" -o tsv 2>/dev/null || echo "")
+              deploy_status="${deploy_status:-unknown}"
 
-          echo "${{ inputs.region_label }} staging health check failed after $max_retries attempts"
-          echo "status=unhealthy" >> $GITHUB_OUTPUT
-          exit 1
+              if [ "$state" = "Running" ] && [ "$deploy_status" = "4" ]; then
+                echo "${{ inputs.region_label }} staging healthy (state=$state, deploy_status=$deploy_status)"
+                echo "status=healthy" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+              echo "Attempt $i/$max_retries: state=$state deploy_status=$deploy_status, retrying in ${retry_delay}s..."
+              [ $i -lt $max_retries ] && sleep $retry_delay
+            done
+
+            echo "${{ inputs.region_label }} staging health check failed after $max_retries attempts"
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            exit 1
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
 
   # ============================================
   # SWAP STAGING TO PRODUCTION
@@ -188,6 +218,10 @@ jobs:
   # ============================================
   # VERIFY PRODUCTION AFTER SWAP
   # ============================================
+  # Post-swap health is already enforced by the swap warmup ping (Azure refuses
+  # to complete a swap if the target slot doesn't return 200 on
+  # WEBSITE_SWAP_WARMUP_PING_PATH). This job therefore only sanity-checks that
+  # the production slot is Running via the management plane.
   verify-production:
     runs-on: ubuntu-latest
     needs: swap
@@ -198,26 +232,42 @@ jobs:
       - name: Wait for swap to stabilize
         run: sleep 15
 
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
       - name: Verify ${{ inputs.region_label }} production health after swap
         id: health_check
-        run: |
-          max_retries=${{ inputs.health_check_retries }}
-          retry_delay=${{ inputs.health_check_delay }}
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            max_retries=${{ inputs.health_check_retries }}
+            retry_delay=${{ inputs.health_check_delay }}
 
-          for i in $(seq 1 $max_retries); do
-            response=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.production_url }}${{ inputs.health_check_path }}")
-            if [ "$response" = "200" ]; then
-              echo "${{ inputs.region_label }} production health check passed after swap (attempt $i/$max_retries)"
-              echo "status=healthy" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            echo "Attempt $i/$max_retries: ${{ inputs.region_label }} production returned HTTP $response, retrying in ${retry_delay}s..."
-            [ $i -lt $max_retries ] && sleep $retry_delay
-          done
+            for i in $(seq 1 $max_retries); do
+              state=$(az webapp show \
+                --name "${{ inputs.app_name }}" \
+                --resource-group "${{ inputs.resource_group }}" \
+                --query state -o tsv 2>/dev/null || echo "Unknown")
 
-          echo "status=unhealthy" >> $GITHUB_OUTPUT
-          echo "::error::${{ inputs.region_label }} production health check failed after swap!"
-          exit 1
+              if [ "$state" = "Running" ]; then
+                echo "${{ inputs.region_label }} production healthy after swap (state=$state)"
+                echo "status=healthy" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+              echo "Attempt $i/$max_retries: production state=$state, retrying in ${retry_delay}s..."
+              [ $i -lt $max_retries ] && sleep $retry_delay
+            done
+
+            echo "status=unhealthy" >> $GITHUB_OUTPUT
+            echo "::error::${{ inputs.region_label }} production not Running after swap!"
+            exit 1
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
 
   # ============================================
   # AUTO-ROLLBACK ON FAILURE

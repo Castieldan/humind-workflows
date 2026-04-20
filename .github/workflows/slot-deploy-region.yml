@@ -108,21 +108,6 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Set APP_VERSION on staging slot
-        # Set BEFORE the zip deploy so the app picks it up on its first start
-        # after deployment. The setting also follows the swap into production,
-        # so the live slot ends up reporting the right version.
-        uses: azure/CLI@v2
-        with:
-          azcliversion: latest
-          inlineScript: |
-            az webapp config appsettings set \
-              --resource-group ${{ inputs.resource_group }} \
-              --name ${{ inputs.app_name }} \
-              --slot ${{ inputs.staging_slot_name }} \
-              --settings APP_VERSION=${{ inputs.version }} \
-              --output none
-
       - name: Deploy to ${{ inputs.region_label }} staging slot
         uses: azure/CLI@v2
         with:
@@ -137,6 +122,23 @@ jobs:
               --type zip \
               --async false
             echo "Deployment to staging slot complete"
+
+      - name: Set APP_VERSION on staging slot
+        # Set AFTER the deploy: `az webapp config appsettings set` triggers a
+        # slot restart, and if that happens during the zip deploy, Kudu SCM
+        # returns 504 Gateway Timeout. Setting after is safe — the setting
+        # follows the swap into production so the live slot ends up with the
+        # right version regardless.
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az webapp config appsettings set \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --settings APP_VERSION=${{ inputs.version }} \
+              --output none
 
       - name: Logout from Azure
         run: az logout

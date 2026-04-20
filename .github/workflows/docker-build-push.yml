@@ -1,0 +1,89 @@
+# Reusable workflow: Build and push a Docker image to Azure Container Registry
+# Authenticates via OIDC (no secrets) — caller must define AZURE_CLIENT_ID,
+# AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID as repo/env Variables, and the matching
+# managed identity must have AcrPush on the target ACR.
+#
+# Tags pushed: <version> and `latest`. Output `image_uri` is the version-tagged
+# URI — pass it to container-app-deploy.yml to deploy that exact image.
+#
+# Called by: humind-chat-service, humind-scheduler-service
+
+name: Docker Build & Push
+
+on:
+  workflow_call:
+    inputs:
+      registry_login_server:
+        description: 'ACR login server (e.g., crhumindprod.azurecr.io)'
+        required: true
+        type: string
+      image_name:
+        description: 'Image repository name within the registry (e.g., humind-chat-service)'
+        required: true
+        type: string
+      version:
+        description: 'Version tag (typically YYYYMMDD-<sha7>)'
+        required: true
+        type: string
+      build_context:
+        description: 'Path to the Docker build context'
+        required: false
+        type: string
+        default: '.'
+      dockerfile_path:
+        description: 'Path to the Dockerfile (relative to build_context)'
+        required: false
+        type: string
+        default: 'Dockerfile'
+    outputs:
+      image_uri:
+        description: 'Full image URI with version tag (e.g., crhumindprod.azurecr.io/humind-chat-service:20260418-abc1234)'
+        value: ${{ jobs.build.outputs.image_uri }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.compute_uri.outputs.image_uri }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image URI
+        id: compute_uri
+        run: |
+          echo "image_uri=${{ inputs.registry_login_server }}/${{ inputs.image_name }}:${{ inputs.version }}" >> $GITHUB_OUTPUT
+
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR via managed identity
+        # `az acr login` exchanges the AAD token for an ACR refresh token; no
+        # admin password needed once the MI has AcrPush on the registry.
+        run: az acr login --name ${{ inputs.registry_login_server }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.build_context }}/${{ inputs.dockerfile_path }}
+          push: true
+          tags: |
+            ${{ steps.compute_uri.outputs.image_uri }}
+            ${{ inputs.registry_login_server }}/${{ inputs.image_name }}:latest
+          cache-from: type=registry,ref=${{ inputs.registry_login_server }}/${{ inputs.image_name }}:buildcache
+          cache-to: type=registry,ref=${{ inputs.registry_login_server }}/${{ inputs.image_name }}:buildcache,mode=max
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()

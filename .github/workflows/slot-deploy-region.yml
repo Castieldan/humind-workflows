@@ -73,10 +73,18 @@ on:
         description: 'GitHub environment name for production deployment'
         required: true
         type: string
+      version:
+        description: 'Version string injected as APP_VERSION on the staging slot before deploy. Swaps to production with the swap, so the live slot ends up with the right value.'
+        required: true
+        type: string
     outputs:
       deployment_status:
         description: 'Final deployment status: staging-only, healthy, or unhealthy'
         value: ${{ jobs.status.outputs.result }}
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   # ============================================
@@ -93,10 +101,27 @@ jobs:
         with:
           name: ${{ inputs.artifact_name }}
 
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set APP_VERSION on staging slot
+        # Set BEFORE the zip deploy so the app picks it up on its first start
+        # after deployment. The setting also follows the swap into production,
+        # so the live slot ends up reporting the right version.
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az webapp config appsettings set \
+              --resource-group ${{ inputs.resource_group }} \
+              --name ${{ inputs.app_name }} \
+              --slot ${{ inputs.staging_slot_name }} \
+              --settings APP_VERSION=${{ inputs.version }} \
+              --output none
 
       - name: Deploy to ${{ inputs.region_label }} staging slot
         uses: azure/CLI@v2
@@ -136,10 +161,12 @@ jobs:
       - name: Wait for deployment to stabilize
         run: sleep ${{ inputs.health_check_wait }}
 
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify ${{ inputs.region_label }} staging slot health
         id: health_check
@@ -193,10 +220,12 @@ jobs:
       name: ${{ inputs.env_production }}
       url: ${{ inputs.production_url }}
     steps:
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Swap staging to production (${{ inputs.region_label }})
         uses: azure/CLI@v2
@@ -234,10 +263,12 @@ jobs:
         # so no need to sleep long. Swap has already completed (Azure returned).
         run: sleep 5
 
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Verify ${{ inputs.region_label }} production health after swap
         id: health_check
@@ -279,10 +310,12 @@ jobs:
     needs: verify-production
     if: failure() && needs.verify-production.outputs.health_status == 'unhealthy'
     steps:
-      - name: Login to Azure
+      - name: Login to Azure (OIDC)
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Rollback ${{ inputs.region_label }} (swap back)
         uses: azure/CLI@v2

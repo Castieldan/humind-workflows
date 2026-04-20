@@ -32,7 +32,7 @@ secrets: inherit
 ---
 
 ### `blob-deploy.yml`
-**Used by:** humind-B2B, humind-merchant-embed, humind-quiz-elements
+**Used by:** humind-B2B, humind-merchant-embed, humind-widgets
 
 Deploy static files to Azure Blob Storage with CDN cache purge.
 

@@ -1,7 +1,7 @@
 # Reusable workflow: Deploy static files to Azure Blob Storage + purge CDN
 # Handles: Azure login → SAS token → azcopy upload → validate → purge CDN → cleanup
 #
-# Called by: humind-B2B, humind-merchant-embed, humind-quiz-elements
+# Called by: humind-B2B, humind-merchant-embed, humind-widgets
 
 name: Blob Storage Deploy
 

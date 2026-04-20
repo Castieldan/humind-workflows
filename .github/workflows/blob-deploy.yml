@@ -166,6 +166,10 @@ jobs:
           echo "All files validated successfully."
 
       - name: Purge Front Door Cache
+        # continue-on-error: a failed purge is recoverable (cache TTL expires
+        # naturally) and shouldn't fail the whole deploy. The blob upload
+        # already succeeded — that's what matters.
+        continue-on-error: true
         run: |
           set -f  # Disable globbing to prevent /* from expanding
           az afd endpoint purge \

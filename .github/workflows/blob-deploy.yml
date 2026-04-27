@@ -53,6 +53,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_cache_paths:
+        description: 'Space-separated file paths (relative to ./build) that must always be served with Cache-Control: no-cache. Use for unhashed entry points like a loader.js whose URL is referenced externally and content changes between deploys.'
+        required: false
+        type: string
+        default: ''
       environment_name:
         description: 'GitHub environment name'
         required: true
@@ -155,6 +160,30 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff2" --content-type "font/woff2" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff" --content-type "font/woff" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ttf" --content-type "font/ttf" --overwrite true
+          fi
+
+          # No-cache override for explicit entry-point files (e.g. v1/loader.js).
+          # Re-uploads each file listed in `no_cache_paths` AFTER the bulk uploads,
+          # so its Cache-Control overrides whatever the bulk pass set.
+          # Required for unhashed files whose URL is referenced externally
+          # (Shopify Liquid blocks, customer themes, …) and whose content changes
+          # between deploys — without no-cache, AFD + browsers serve stale content
+          # until the AFD purge propagates (which can fail silently with --no-wait).
+          if [ -n "${{ inputs.no_cache_paths }}" ]; then
+            NO_CACHE_OVERRIDE="no-cache, no-store, must-revalidate"
+            for path in ${{ inputs.no_cache_paths }}; do
+              case "$path" in
+                *.js)   ct="application/javascript" ;;
+                *.css)  ct="text/css" ;;
+                *.html) ct="text/html" ;;
+                *.json) ct="application/json" ;;
+                *.svg)  ct="image/svg+xml" ;;
+                *)      ct="application/octet-stream" ;;
+              esac
+              # Single-file copy: dest URL points at the exact blob path.
+              FILE_DEST="https://${{ inputs.storage_account_name }}.blob.core.windows.net/\$web/${path}?${{ steps.sas.outputs.token }}"
+              azcopy copy "./build/${path}" "$FILE_DEST" --content-type "$ct" --cache-control "$NO_CACHE_OVERRIDE" --overwrite true
+            done
           fi
 
       - name: Validate uploaded files

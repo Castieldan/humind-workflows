@@ -121,8 +121,14 @@ jobs:
             # HTML — never cache (CDN always serves latest)
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.html" --content-type "text/html" --cache-control "$NO_CACHE" --overwrite true
 
-            # JSON config — short cache (1 hour)
+            # robots.txt / sitemap.xml — never cache (SEO updates need to propagate fast)
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.txt" --content-type "text/plain" --cache-control "$NO_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.xml" --content-type "application/xml" --cache-control "$NO_CACHE" --overwrite true
+
+            # JSON / YAML config (e.g. openapi.yaml) — short cache (1 hour)
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --cache-control "$SHORT_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yaml" --content-type "application/yaml" --cache-control "$SHORT_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yml" --content-type "application/yaml" --cache-control "$SHORT_CACHE" --overwrite true
 
             # i18n override — no cache for translation files
             if [ "${{ inputs.has_i18n }}" = "true" ]; then
@@ -134,7 +140,11 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.js" --content-type "application/javascript" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.css" --content-type "text/css" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.html" --content-type "text/html" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.txt" --content-type "text/plain" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.xml" --content-type "application/xml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yaml" --content-type "application/yaml" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yml" --content-type "application/yaml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.svg" --content-type "image/svg+xml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.png" --content-type "image/png" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.webp" --content-type "image/webp" --overwrite true

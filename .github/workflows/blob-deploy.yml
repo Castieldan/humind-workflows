@@ -132,6 +132,8 @@ jobs:
 
             # JSON / YAML config (e.g. openapi.yaml) — short cache (1 hour)
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --cache-control "$SHORT_CACHE" --overwrite true
+            # Raw markdown sources (docs site /raw/*.md, consumed by the MCP docs tools) — short cache
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.md" --content-type "text/markdown; charset=utf-8" --cache-control "$SHORT_CACHE" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yaml" --content-type "application/yaml" --cache-control "$SHORT_CACHE" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yml" --content-type "application/yaml" --cache-control "$SHORT_CACHE" --overwrite true
 
@@ -148,6 +150,7 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.txt" --content-type "text/plain" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.xml" --content-type "application/xml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.json" --content-type "application/json" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.md" --content-type "text/markdown; charset=utf-8" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yaml" --content-type "application/yaml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.yml" --content-type "application/yaml" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.svg" --content-type "image/svg+xml" --overwrite true

@@ -1,0 +1,178 @@
+name: Revue hebdomadaire des PR Dependabot
+
+# Job centralisé : parcourt tous les repos Humind, valide chaque PR Dependabot
+# (npm ci + build dans un clone isolé), merge celles qui passent les trois gardes,
+# et ouvre une issue de synthèse pour tout ce qui demande une décision humaine.
+#
+# Les trois gardes avant merge :
+#   1. la PR doit être MERGEABLE (pas de conflit, pas de lockfile cassé)
+#   2. aucun saut de version MAJEUR dans package.json
+#   3. npm ci + npm run build verts sur la branche de la PR
+#
+# ⚠️ Un merge sur main déclenche le deploy.yml du repo concerné.
+#    Les deploy.yml ont un concurrency group : les déploiements se sérialisent.
+#    Pour désamorcer temporairement, lancer à la main avec dry_run=true,
+#    ou désactiver le workflow dans l'onglet Actions.
+#
+# Prérequis : secret DEPENDABOT_REVIEW_TOKEN
+#   PAT fine-grained ayant accès aux repos Humind, avec les permissions
+#   Contents=read/write, Pull requests=read/write, Issues=read/write.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # lundi 06:17 UTC (~08:17 Paris)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Analyser sans merger"
+        type: boolean
+        default: true
+      only_repo:
+        description: "Limiter à un seul repo (vide = tous)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ secrets.DEPENDABOT_REVIEW_TOKEN }}
+      DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
+      ONLY_REPO: ${{ inputs.only_repo }}
+      OWNER: Castieldan
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Valider et merger les PR Dependabot
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          REPOS="humind-backend humind-B2B humind-merchant-embed humind-website humind-widgets humind-helpcenter humind-docs humind-shopify-app humind-chat-service humind-scheduler-service humind-infrastructure humind-workflows"
+          if [ -n "$ONLY_REPO" ]; then REPOS="$ONLY_REPO"; fi
+
+          REPORT="$(mktemp)"
+          {
+            echo "## Revue Dependabot du $(date -u +%Y-%m-%d)"
+            echo ""
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "> Mode analyse seule : aucun merge effectué."
+              echo ""
+            fi
+          } >> "$REPORT"
+
+          MERGED=0
+          HELD=0
+
+          for repo in $REPOS; do
+            prs="$(gh pr list -R "$OWNER/$repo" --author 'app/dependabot' --state open --json number --jq '.[].number' 2>/dev/null)"
+            if [ -z "$prs" ]; then continue; fi
+
+            echo "### $repo" >> "$REPORT"
+
+            for pr in $prs; do
+              meta="$(gh pr view -R "$OWNER/$repo" "$pr" --json title,mergeable,files 2>/dev/null)"
+              title="$(echo "$meta" | jq -r .title)"
+              mergeable="$(echo "$meta" | jq -r .mergeable)"
+              manifests="$(echo "$meta" | jq -r '[.files[].path] | map(select(test("(^|/)package\\.json$"))) | length')"
+
+              echo "::group::$repo #$pr — $title"
+
+              # --- Garde 1 : la PR doit être mergeable ---
+              if [ "$mergeable" != "MERGEABLE" ]; then
+                echo "- ⏸️ #$pr \`$title\` — non mergeable ($mergeable), à rebaser" >> "$REPORT"
+                HELD=$((HELD + 1)); echo "::endgroup::"; continue
+              fi
+
+              # --- Garde 2 : refuser tout saut de version MAJEUR ---
+              major=""
+              if [ "$manifests" -gt 0 ]; then
+                major="$(gh api "/repos/$OWNER/$repo/pulls/$pr/files" \
+                          --jq '.[] | select(.filename | test("(^|/)package\\.json$")) | .patch' 2>/dev/null \
+                        | grep -E '^[+-][[:space:]]*"[^"]+":[[:space:]]*"[\^~]?[0-9]' \
+                        | sed -E 's/^([+-])[[:space:]]*"([^"]+)":[[:space:]]*"[\^~]?([0-9]+).*/\1 \2 \3/' \
+                        | awk '$1=="-"{o[$2]=$3} $1=="+"{n[$2]=$3} END{for(k in n) if((k in o) && n[k]+0>o[k]+0) printf "%s %s→%s ", k, o[k], n[k]}')"
+              fi
+              if [ -n "$major" ]; then
+                echo "- 🛑 #$pr \`$title\` — **saut majeur** ($major) : décision humaine requise" >> "$REPORT"
+                HELD=$((HELD + 1)); echo "::endgroup::"; continue
+              fi
+
+              # --- Garde 3 : le build doit passer sur la branche de la PR ---
+              work="$(mktemp -d)"
+              if ! gh repo clone "$OWNER/$repo" "$work" -- -q 2>/dev/null; then
+                echo "- ⚠️ #$pr \`$title\` — clone impossible" >> "$REPORT"
+                HELD=$((HELD + 1)); rm -rf "$work"; echo "::endgroup::"; continue
+              fi
+              verdict="unknown"
+              if ! (cd "$work" && gh pr checkout "$pr" --force >/dev/null 2>&1); then
+                verdict="checkout-fail"
+              elif [ ! -f "$work/package.json" ]; then
+                verdict="no-build" # repo non-npm (docker, terraform, actions) : rien à compiler
+              elif ! (cd "$work" && npm ci --no-audit --no-fund >/dev/null 2>&1); then
+                verdict="ci-fail"
+              elif ! jq -e '.scripts.build' "$work/package.json" >/dev/null 2>&1; then
+                verdict="ok" # pas de script build : npm ci vert suffit
+              elif (cd "$work" && npm run build >/dev/null 2>&1); then
+                verdict="ok"
+              else
+                verdict="build-fail"
+              fi
+              rm -rf "$work"
+
+              case "$verdict" in
+                ok | no-build)
+                  if [ "$DRY_RUN" = "true" ]; then
+                    echo "- ✅ #$pr \`$title\` — validée (non mergée, dry-run)" >> "$REPORT"
+                  elif gh pr merge -R "$OWNER/$repo" "$pr" --squash --delete-branch >/dev/null 2>&1; then
+                    echo "- ✅ #$pr \`$title\` — **mergée**" >> "$REPORT"
+                    MERGED=$((MERGED + 1))
+                  else
+                    echo "- ⚠️ #$pr \`$title\` — build vert mais merge refusé" >> "$REPORT"
+                    HELD=$((HELD + 1))
+                  fi
+                  ;;
+                *)
+                  echo "- ❌ #$pr \`$title\` — \`$verdict\`, à traiter à la main" >> "$REPORT"
+                  HELD=$((HELD + 1))
+                  ;;
+              esac
+              echo "::endgroup::"
+            done
+            echo "" >> "$REPORT"
+          done
+
+          # --- Alertes sans correctif publié : visibles seulement dans l'onglet Dependabot ---
+          echo "### Alertes sans correctif publié (aucune PR possible)" >> "$REPORT"
+          found=0
+          for repo in $REPOS; do
+            raw="$(gh api "/repos/$OWNER/$repo/dependabot/alerts?state=open&per_page=100" --paginate 2>/dev/null || true)"
+            if [ -z "$raw" ]; then continue; fi
+            n="$(echo "$raw" | jq -s '[.[][]] | map(select(.security_vulnerability.first_patched_version == null)) | length' 2>/dev/null || echo 0)"
+            if [ "${n:-0}" -gt 0 ]; then
+              pkgs="$(echo "$raw" | jq -sr '[.[][]] | map(select(.security_vulnerability.first_patched_version == null)) | [.[].dependency.package.name] | unique | join(", ")')"
+              echo "- **$repo** : $n alerte(s) — $pkgs" >> "$REPORT"
+              found=1
+            fi
+          done
+          if [ "$found" = "0" ]; then echo "- Aucune." >> "$REPORT"; fi
+
+          {
+            echo ""
+            echo "_$MERGED mergée(s), $HELD en attente._"
+          } >> "$REPORT"
+
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+          # Issue de synthèse seulement s'il reste des décisions à prendre
+          if [ "$HELD" -gt 0 ]; then
+            gh issue create -R "$OWNER/humind-workflows" \
+              --title "Revue Dependabot — $(date -u +%Y-%m-%d) — $HELD en attente" \
+              --body-file "$REPORT" || true
+          fi

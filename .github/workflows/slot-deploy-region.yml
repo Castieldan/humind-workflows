@@ -97,19 +97,19 @@ jobs:
       url: ${{ inputs.staging_url }}
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact_name }}
 
       - name: Login to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy to ${{ inputs.region_label }} staging slot
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -135,7 +135,7 @@ jobs:
         # returns 504 Gateway Timeout. Setting after is safe — the setting
         # follows the swap into production so the live slot ends up with the
         # right version regardless.
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -172,7 +172,7 @@ jobs:
         run: sleep ${{ inputs.health_check_wait }}
 
       - name: Login to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -180,7 +180,7 @@ jobs:
 
       - name: Verify ${{ inputs.region_label }} staging slot health
         id: health_check
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -231,14 +231,14 @@ jobs:
       url: ${{ inputs.production_url }}
     steps:
       - name: Login to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Swap staging to production (${{ inputs.region_label }})
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -276,7 +276,7 @@ jobs:
         run: sleep 5
 
       - name: Login to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
@@ -284,7 +284,7 @@ jobs:
 
       - name: Verify ${{ inputs.region_label }} production health after swap
         id: health_check
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |
@@ -325,14 +325,14 @@ jobs:
       name: ${{ inputs.env_production }}
     steps:
       - name: Login to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Rollback ${{ inputs.region_label }} (swap back)
-        uses: azure/CLI@v2
+        uses: azure/CLI@v3
         with:
           azcliversion: latest
           inlineScript: |

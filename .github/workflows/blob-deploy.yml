@@ -122,6 +122,7 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff2" --content-type "font/woff2" --cache-control "$LONG_CACHE" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff" --content-type "font/woff" --cache-control "$LONG_CACHE" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ttf" --content-type "font/ttf" --cache-control "$LONG_CACHE" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.mp3" --content-type "audio/mpeg" --cache-control "$LONG_CACHE" --overwrite true
 
             # HTML — never cache (CDN always serves latest)
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.html" --content-type "text/html" --cache-control "$NO_CACHE" --overwrite true
@@ -163,6 +164,7 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff2" --content-type "font/woff2" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.woff" --content-type "font/woff" --overwrite true
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.ttf" --content-type "font/ttf" --overwrite true
+            azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.mp3" --content-type "audio/mpeg" --overwrite true
           fi
 
           # No-cache override for explicit entry-point files (e.g. v1/loader.js).

@@ -103,6 +103,23 @@ jobs:
         run: |
           DEST="https://${{ inputs.storage_account_name }}.blob.core.windows.net/\$web?${{ steps.sas.outputs.token }}"
 
+          # The entry points listed in `no_cache_paths` (loader.js, …) stay out
+          # of the bulk passes: those would publish them for a few minutes with
+          # the one-year immutable Cache-Control of hashed assets, and a browser
+          # that loads the page in that window keeps that copy, hence that
+          # version of the app, for a year. Set aside here, put back after the
+          # bulk passes and uploaded last with no-cache (see below): until then
+          # the previous deployment's copy keeps being served, and the new one
+          # only goes live once every file it points to is there.
+          ENTRYPOINTS_ASIDE="${RUNNER_TEMP:-/tmp}/no-cache-entrypoints"
+          rm -rf "$ENTRYPOINTS_ASIDE"
+          for path in ${{ inputs.no_cache_paths }}; do
+            if [ -f "./build/${path}" ]; then
+              mkdir -p "$ENTRYPOINTS_ASIDE/$(dirname "$path")"
+              mv "./build/${path}" "$ENTRYPOINTS_ASIDE/${path}"
+            fi
+          done
+
           if [ "${{ inputs.enable_cache_control }}" = "true" ]; then
             # Upload with Cache-Control headers (long cache for hashed assets)
             LONG_CACHE="public, max-age=31536000, immutable"
@@ -167,13 +184,21 @@ jobs:
             azcopy copy "./build/*" "$DEST" --recursive --include-pattern "*.mp3" --content-type "audio/mpeg" --overwrite true
           fi
 
-          # No-cache override for explicit entry-point files (e.g. v1/loader.js).
-          # Re-uploads each file listed in `no_cache_paths` AFTER the bulk uploads,
-          # so its Cache-Control overrides whatever the bulk pass set.
+          # Back in ./build: the upload below and the cleanup step (which keeps
+          # on the blob only what ./build holds) both read them from there.
+          for path in ${{ inputs.no_cache_paths }}; do
+            if [ -f "$ENTRYPOINTS_ASIDE/${path}" ]; then
+              mv "$ENTRYPOINTS_ASIDE/${path}" "./build/${path}"
+            fi
+          done
+
+          # Explicit entry-point files (e.g. v1/loader.js): uploaded here, AFTER
+          # the bulk uploads and only here, always with no-cache.
           # Required for unhashed files whose URL is referenced externally
           # (Shopify Liquid blocks, customer themes, …) and whose content changes
-          # between deploys — without no-cache, AFD + browsers serve stale content
-          # until the AFD purge propagates (which can fail silently with --no-wait).
+          # between deploys — with any other Cache-Control, AFD + browsers serve
+          # stale content until the AFD purge propagates (which can fail silently
+          # with --no-wait), and browsers keep an immutable copy for good.
           if [ -n "${{ inputs.no_cache_paths }}" ]; then
             NO_CACHE_OVERRIDE="no-cache, no-store, must-revalidate"
             for path in ${{ inputs.no_cache_paths }}; do

@@ -1,7 +1,7 @@
 # Reusable workflow: Deploy static files to Azure Blob Storage + purge CDN
 # Handles: Azure login → SAS token → azcopy upload → validate → purge CDN → cleanup
 #
-# Called by: humind-B2B, humind-merchant-embed, humind-widgets
+# Called by: humind-B2B, humind-merchant-embed, humind-widgets, documentation
 
 name: Blob Storage Deploy
 
@@ -115,7 +115,7 @@ jobs:
           rm -rf "$ENTRYPOINTS_ASIDE"
           for path in ${{ inputs.no_cache_paths }}; do
             if [ -f "./build/${path}" ]; then
-              mkdir -p "$ENTRYPOINTS_ASIDE/$(dirname "$path")"
+              mkdir -p "$ENTRYPOINTS_ASIDE/$(dirname -- "$path")"
               mv "./build/${path}" "$ENTRYPOINTS_ASIDE/${path}"
             fi
           done
@@ -186,6 +186,9 @@ jobs:
 
           # Back in ./build: the upload below and the cleanup step (which keeps
           # on the blob only what ./build holds) both read them from there.
+          # A failed bulk pass stops the step before this point: the cleanup
+          # step must keep running only after a successful upload (no always()),
+          # or it would delete the entry points still set aside.
           for path in ${{ inputs.no_cache_paths }}; do
             if [ -f "$ENTRYPOINTS_ASIDE/${path}" ]; then
               mv "$ENTRYPOINTS_ASIDE/${path}" "./build/${path}"
@@ -198,7 +201,7 @@ jobs:
           # (Shopify Liquid blocks, customer themes, …) and whose content changes
           # between deploys — with any other Cache-Control, AFD + browsers serve
           # stale content until the AFD purge propagates (which can fail silently
-          # with --no-wait), and browsers keep an immutable copy for good.
+          # with --no-wait), and browsers keep an immutable copy for a year.
           if [ -n "${{ inputs.no_cache_paths }}" ]; then
             NO_CACHE_OVERRIDE="no-cache, no-store, must-revalidate"
             for path in ${{ inputs.no_cache_paths }}; do

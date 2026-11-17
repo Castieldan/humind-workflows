@@ -1,0 +1,177 @@
+# Reusable workflow: zero-downtime deploy of a Docker image to an Azure App
+# Service through its staging slot.
+#
+# Flow (one region per call, serialized per app by `concurrency`):
+#   1. APP_VERSION and the image are set on the staging slot. The slot is kept
+#      STOPPED between deploys, so these two writes restart nothing.
+#   2. The slot starts once, with the right image and version.
+#   3. Swap staging -> production. Azure warms the slot up first and refuses
+#      the swap unless /health answers 200 (WEBSITE_SWAP_WARMUP_PING_PATH and
+#      _STATUSES, set by humind-infrastructure). Production keeps serving the
+#      whole time; a failed warm-up leaves it untouched.
+#   4. Production must then run the new image AND the new APP_VERSION, read
+#      through the management plane (*.azurewebsites.net is IP-restricted).
+#   5. On failure after the swap: swap back (the previous version is still
+#      running in staging). On success: stop the staging slot, which now holds
+#      the previous version, to give its memory back to the shared plan.
+#
+# Why not container-app-deploy.yml: it changes the image on the live app and
+# ends with `az webapp restart`, which stops every instance of the region at
+# once. App Service holds the requests and Front Door keeps routing to the
+# region: 30-60 s without the service per deploy (measured on chat-service,
+# 16-17/11/2026: 450-610 abandoned /agents/params in EU per deploy).
+#
+# Requirements on the app (humind-infrastructure, e.g. chat-slots.tf): a slot
+# named `slot_name`, the warm-up settings on both sides, and any per-slot
+# setting marked sticky.
+#
+# Called by: humind-chat-service (prod EU + US)
+
+name: Container Slot Deploy
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Azure App Service name (production slot)'
+        required: true
+        type: string
+      resource_group:
+        description: 'Azure resource group containing the App Service'
+        required: true
+        type: string
+      slot_name:
+        description: 'Staging slot swapped into production'
+        required: false
+        type: string
+        default: 'staging'
+      image_uri:
+        description: 'Full image URI to deploy (registry/name:tag)'
+        required: true
+        type: string
+      version:
+        description: 'Version string injected as APP_VERSION (follows the swap into production)'
+        required: true
+        type: string
+      app_url:
+        description: 'Public URL of the App Service (shown on the GitHub environment)'
+        required: true
+        type: string
+      environment_name:
+        description: 'GitHub environment name (e.g. Production-Europe)'
+        required: true
+        type: string
+      check_retries:
+        description: 'Number of mgmt-plane check attempts (staging start, production verify)'
+        required: false
+        type: string
+        default: '30'
+      check_delay:
+        description: 'Seconds between mgmt-plane check attempts'
+        required: false
+        type: string
+        default: '10'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment_name }}
+      url: ${{ inputs.app_url }}
+    # Two pushes close together must never swap the same app at the same time.
+    # cancel-in-progress stays false: an interrupted swap is worse than a wait.
+    concurrency:
+      group: container-slot-deploy-${{ inputs.app_name }}
+      cancel-in-progress: false
+    timeout-minutes: 30
+    env:
+      RG: ${{ inputs.resource_group }}
+      APP: ${{ inputs.app_name }}
+      SLOT: ${{ inputs.slot_name }}
+      IMAGE: ${{ inputs.image_uri }}
+      VERSION: ${{ inputs.version }}
+      RETRIES: ${{ inputs.check_retries }}
+      DELAY: ${{ inputs.check_delay }}
+    steps:
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set APP_VERSION and image on the staging slot
+        run: |
+          az webapp config appsettings set \
+            --resource-group "$RG" --name "$APP" --slot "$SLOT" \
+            --settings APP_VERSION="$VERSION" \
+            --output none
+          az webapp config container set \
+            --resource-group "$RG" --name "$APP" --slot "$SLOT" \
+            --container-image-name "$IMAGE" \
+            --output none
+
+      - name: Start the staging slot
+        # No-op when the slot is already running (e.g. after a failed run);
+        # the two writes above have then restarted it with the new values.
+        run: az webapp start --resource-group "$RG" --name "$APP" --slot "$SLOT"
+
+      - name: Wait for the staging slot to run the new image
+        run: |
+          for i in $(seq 1 "$RETRIES"); do
+            state=$(az webapp show -g "$RG" -n "$APP" --slot "$SLOT" --query state -o tsv 2>/dev/null || echo Unknown)
+            fx=$(az webapp config show -g "$RG" -n "$APP" --slot "$SLOT" --query linuxFxVersion -o tsv 2>/dev/null || echo "")
+            if [ "$state" = "Running" ] && [ "$fx" = "DOCKER|$IMAGE" ]; then
+              echo "Staging slot running $IMAGE"
+              exit 0
+            fi
+            echo "Attempt $i/$RETRIES: state=$state image=$fx"
+            [ "$i" -lt "$RETRIES" ] && sleep "$DELAY"
+          done
+          echo "::error::Staging slot of $APP is not running $IMAGE"
+          exit 1
+
+      - name: Swap staging into production
+        id: swap
+        # Azure warms the slot up on /health (200 required) before switching
+        # traffic; a failed warm-up aborts the swap and production is untouched.
+        run: |
+          az webapp deployment slot swap \
+            --resource-group "$RG" --name "$APP" \
+            --slot "$SLOT" --target-slot production
+
+      - name: Verify production runs the new version
+        run: |
+          for i in $(seq 1 "$RETRIES"); do
+            state=$(az webapp show -g "$RG" -n "$APP" --query state -o tsv 2>/dev/null || echo Unknown)
+            fx=$(az webapp config show -g "$RG" -n "$APP" --query linuxFxVersion -o tsv 2>/dev/null || echo "")
+            ver=$(az webapp config appsettings list -g "$RG" -n "$APP" --query "[?name=='APP_VERSION'].value | [0]" -o tsv 2>/dev/null || echo "")
+            if [ "$state" = "Running" ] && [ "$fx" = "DOCKER|$IMAGE" ] && [ "$ver" = "$VERSION" ]; then
+              echo "Production of $APP runs $IMAGE ($VERSION)"
+              exit 0
+            fi
+            echo "Attempt $i/$RETRIES: state=$state image=$fx version=$ver"
+            [ "$i" -lt "$RETRIES" ] && sleep "$DELAY"
+          done
+          echo "::error::Production of $APP does not run $IMAGE ($VERSION) after the swap"
+          exit 1
+
+      - name: Roll back (swap the previous version back)
+        if: failure() && steps.swap.outcome == 'success'
+        run: |
+          echo "::warning::Rolling back $APP: swapping the previous version back into production"
+          az webapp deployment slot swap \
+            --resource-group "$RG" --name "$APP" \
+            --slot "$SLOT" --target-slot production
+
+      - name: Stop the staging slot (previous version)
+        if: success()
+        run: az webapp stop --resource-group "$RG" --name "$APP" --slot "$SLOT"
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout

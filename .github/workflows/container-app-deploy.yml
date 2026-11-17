@@ -6,7 +6,10 @@
 # Health check matches the deployed version against the app's response —
 # catches stuck restarts where the App Service didn't pick up the new image.
 #
-# Called by: humind-chat-service, humind-scheduler-service
+# Called by: humind-scheduler-service (prod + preprod), humind-chat-service
+# (preprod only). Ends with `az webapp restart`, which stops every instance
+# of the region at once: services with a staging slot use
+# container-slot-deploy.yml instead (no downtime).
 
 name: Container App Deploy
 

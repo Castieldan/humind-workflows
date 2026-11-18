@@ -12,8 +12,9 @@
 #   4. Production must then run the new image AND the new APP_VERSION, read
 #      through the management plane (*.azurewebsites.net is IP-restricted).
 #   5. On failure after the swap: swap back (the previous version is still
-#      running in staging). On success: stop the staging slot, which now holds
-#      the previous version, to give its memory back to the shared plan.
+#      running in staging). On success: wait `drain_seconds` for the requests
+#      still on the previous version, then stop the staging slot to give its
+#      memory back to the shared plan.
 #
 # Why not container-app-deploy.yml: it changes the image on the live app and
 # ends with `az webapp restart`, which stops every instance of the region at
@@ -71,6 +72,11 @@ on:
         required: false
         type: string
         default: '10'
+      drain_seconds:
+        description: 'Seconds the previous version keeps running after the swap before the slot is stopped (lets in-flight requests finish)'
+        required: false
+        type: string
+        default: '150'
 
 permissions:
   id-token: write
@@ -167,6 +173,15 @@ jobs:
           az webapp deployment slot swap \
             --resource-group "$RG" --name "$APP" \
             --slot "$SLOT" --target-slot production
+
+      - name: Let in-flight requests finish on the previous version
+        # Requests and streams opened before the swap stay on the previous
+        # containers (now the staging slot). Stopping them at once would cut a
+        # chat answer mid-generation: /chat/stream runs up to 120 s
+        # (streamAbort in humind-chat-service). Open WebSockets are cut either
+        # way and the widget reconnects to production.
+        if: success()
+        run: sleep "${{ inputs.drain_seconds }}"
 
       - name: Stop the staging slot (previous version)
         if: success()

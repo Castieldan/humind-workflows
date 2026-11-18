@@ -12,9 +12,11 @@
 #   4. Production must then run the new image AND the new APP_VERSION, read
 #      through the management plane (*.azurewebsites.net is IP-restricted).
 #   5. On failure after the swap: swap back (the previous version is still
-#      running in staging). On success: wait `drain_seconds` for the requests
-#      still on the previous version, then stop the staging slot to give its
-#      memory back to the shared plan.
+#      in staging). On success: keep the previous version one swap away for
+#      `drain_seconds`.
+#   6. Stop the staging slot to give its memory back to the shared plan and
+#      stop its background loops, on success AND on failure. Only exception: a
+#      failed roll back, where staging holds the last good version.
 #
 # Why not container-app-deploy.yml: it changes the image on the live app and
 # ends with `az webapp restart`, which stops every instance of the region at
@@ -73,7 +75,7 @@ on:
         type: string
         default: '10'
       drain_seconds:
-        description: 'Seconds the previous version keeps running after the swap before the slot is stopped (lets in-flight requests finish)'
+        description: 'Seconds the previous version stays started in the staging slot after a successful swap, one swap away from production, before the slot is stopped'
         required: false
         type: string
         default: '150'
@@ -167,6 +169,7 @@ jobs:
           exit 1
 
       - name: Roll back (swap the previous version back)
+        id: rollback
         if: failure() && steps.swap.outcome == 'success'
         run: |
           echo "::warning::Rolling back $APP: swapping the previous version back into production"
@@ -174,17 +177,24 @@ jobs:
             --resource-group "$RG" --name "$APP" \
             --slot "$SLOT" --target-slot production
 
-      - name: Let in-flight requests finish on the previous version
-        # Requests and streams opened before the swap stay on the previous
-        # containers (now the staging slot). Stopping them at once would cut a
-        # chat answer mid-generation: /chat/stream runs up to 120 s
-        # (streamAbort in humind-chat-service). Open WebSockets are cut either
-        # way and the widget reconnects to production.
+      - name: Keep the previous version one swap away
+        # This wait does NOT protect in-flight requests: Azure recycles the
+        # former production instances in the last step of the swap ("long-running
+        # operations are abandoned when the workers recycle", App Service docs),
+        # so open /chat/stream answers and WebSockets are cut at the swap and
+        # clients reconnect to the new version, already serving. What the wait
+        # buys: during the first minutes, a manual swap back finds the previous
+        # version already started.
         if: success()
         run: sleep "${{ inputs.drain_seconds }}"
 
-      - name: Stop the staging slot (previous version)
-        if: success()
+      - name: Stop the staging slot
+        # Success: staging holds the previous version. Failure before or during
+        # the swap, or after a roll back: it holds the rejected version, which
+        # would keep its memory on the shared plan and its background loops
+        # (helpdesk sweeper) running. Not stopped after a FAILED roll back:
+        # staging then holds the last good version, needed to recover by hand.
+        if: success() || (failure() && (steps.swap.outcome != 'success' || steps.rollback.outcome == 'success'))
         run: az webapp stop --resource-group "$RG" --name "$APP" --slot "$SLOT"
 
       - name: Logout from Azure
